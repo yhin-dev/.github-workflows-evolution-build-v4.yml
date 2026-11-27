@@ -1,0 +1,155 @@
+
+name: Evolution Kernel - SukiSU Build Verification V4
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_branch:
+        description: "Whyred kernel source branch"
+        required: true
+        default: "back-st21-layered-sched-stable"
+        type: string
+
+      sukisu_ref:
+        description: "Pinned SukiSU commit"
+        required: true
+        default: "adf6e86d55229ad78a5f7758bdc43d92fd1c3729"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Evolution - Kernel Compile Test
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout whyred Kernel
+        uses: actions/checkout@v4
+        with:
+          repository: user-why-red/android_kernel_xiaomi_sdm660_419
+          ref: ${{ inputs.source_branch }}
+          fetch-depth: 1
+          path: kernel
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison flex make \
+            python3 python-is-python3 \
+            gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi \
+            clang lld llvm \
+            libssl-dev libelf-dev \
+            device-tree-compiler \
+            cpio rsync zip unzip curl
+
+      - name: Prepare Pinned SukiSU
+        working-directory: kernel
+        env:
+          SUKISU_REF: ${{ inputs.sukisu_ref }}
+        run: |
+          set -euo pipefail
+
+          curl -fL \
+            https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh \
+            -o /tmp/sukisu-setup.sh
+
+          echo "3b957d854e1112e060d1208d9830515672609430a609f5d32530935bea0b4330  /tmp/sukisu-setup.sh" \
+            | sha256sum -c -
+
+          bash /tmp/sukisu-setup.sh "$SUKISU_REF"
+
+          ACTUAL="$(git -C KernelSU rev-parse HEAD)"
+
+          test "$ACTUAL" = "$SUKISU_REF"
+          test -L drivers/kernelsu
+          test -f drivers/kernelsu/Makefile
+          test -f drivers/kernelsu/Kconfig
+
+          echo "SukiSU commit verified: $ACTUAL"
+
+      - name: Configure Kernel
+        working-directory: kernel
+        run: |
+          set -euo pipefail
+
+          make O=out \
+            ARCH=arm64 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CC=clang \
+            LD=ld.lld \
+            vendor/whyred-perf_defconfig
+
+          scripts/config --file out/.config \
+            --enable KSU \
+            --enable KALLSYMS \
+            --set-str LOCALVERSION "-Evolution" \
+            --disable LOCALVERSION_AUTO \
+            --disable KPM
+
+          make O=out \
+            ARCH=arm64 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CC=clang \
+            LD=ld.lld \
+            olddefconfig
+
+          grep -q '^CONFIG_KSU=y$' out/.config
+
+      - name: Compile Kernel
+        working-directory: kernel
+        run: |
+          set -euo pipefail
+
+          make -j2 O=out \
+            ARCH=arm64 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CC=clang \
+            LD=ld.lld \
+            Image.gz-dtb 2>&1 | tee build.log
+
+          test -s out/arch/arm64/boot/Image.gz-dtb
+
+          echo "KERNEL_COMPILE: PASS"
+
+      - name: Prepare Build Report
+        if: always()
+        working-directory: kernel
+        run: |
+          mkdir -p ../Evolution-V4-Report
+
+          cp out/.config \
+            ../Evolution-V4-Report/kernel.config 2>/dev/null || true
+
+          cp build.log \
+            ../Evolution-V4-Report/build.log 2>/dev/null || true
+
+          git rev-parse HEAD \
+            > ../Evolution-V4-Report/kernel-commit.txt
+
+          git -C KernelSU rev-parse HEAD \
+            > ../Evolution-V4-Report/sukisu-commit.txt 2>/dev/null || true
+
+          if [ -s out/arch/arm64/boot/Image.gz-dtb ]; then
+            cp out/arch/arm64/boot/Image.gz-dtb \
+              ../Evolution-V4-Report/
+          fi
+
+      - name: Upload V4 Build Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Evolution-Kernel-V4-Compile-Test-NOT-FLASHABLE
+          path: Evolution-V4-Report/
+          if-no-files-found: warn
+          retention-days: 14
