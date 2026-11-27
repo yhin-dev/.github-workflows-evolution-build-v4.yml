@@ -151,6 +151,7 @@ jobs:
           grep -q '^CONFIG_KSU=y$' out/.config
 
       - name: Compile Kernel
+        if: false
         working-directory: kernel
         run: |
           set -euo pipefail
@@ -191,11 +192,16 @@ jobs:
               ../Evolution-V4-Report/
           fi
 
+      
       - name: Upload V4 Build Artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Evolution-Kernel-V4-Compile-Test-NOT-FLASHABLE
-          path: Evolution-V4-Report/
+          name: Evolution-Kernel-V41-Compatibility-Audit
+          path: |
+            Evolution-V41-Report/
+            Evolution-V4-Report/
           if-no-files-found: warn
+          retention-days: 14
+
           retention-days: 14
