@@ -1,4 +1,4 @@
-name: Evolution Kernel - V4.4 KernelSU kallsyms fix compile
+name: Evolution Kernel - V4.4.1 KernelSU kallsyms path fix compile
 
 on:
   workflow_dispatch:
@@ -31,8 +31,8 @@ jobs:
           set -euo pipefail
           actual="$(git rev-parse HEAD)"
           test "$actual" = "$KERNEL_PIN"
-          mkdir -p ../Evolution-V44-Report
-          echo "$actual" | tee ../Evolution-V44-Report/kernel-commit.txt
+          mkdir -p ../Evolution-V441-Report
+          echo "$actual" | tee ../Evolution-V441-Report/kernel-commit.txt
 
       - name: Install build dependencies
         run: |
@@ -65,7 +65,7 @@ jobs:
           printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
           printf '\nsource "drivers/kernelsu/Kconfig"\n' >> drivers/Kconfig
 
-          echo "$actual" | tee ../Evolution-V44-Report/kernelsu-commit.txt
+          echo "$actual" | tee ../Evolution-V441-Report/kernelsu-commit.txt
           echo "KernelSU source linked from Najip/xxKSU final (backslashxx preserved commit)."
 
       - name: Fix Linux 4.19 kallsyms iterator availability for builtin KernelSU
@@ -73,11 +73,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
+          python3 - <<'PY' 2>&1 | tee ../Evolution-V441-Report/kallsyms-fix.log
           from pathlib import Path
           import re
 
-          p = Path("kallsyms.c")
+          p = Path("kernel/kallsyms.c")
           s = p.read_text()
 
           # In this pinned 4.19 tree, kallsyms_on_each_symbol() is declared
@@ -104,9 +104,10 @@ jobs:
               raise SystemExit("Unexpected kallsyms iterator implementation; refusing build")
           print("Verified: kallsyms_on_each_symbol definition is now available to builtin callers.")
           PY
-          grep -n -A18 -B3 'int kallsyms_on_each_symbol' kallsyms.c \
+          grep -n -A18 -B3 'int kallsyms_on_each_symbol' kernel/kallsyms.c \
             | tee ../Evolution-V44-kernelsu-kallsyms-fix.txt
-          ! grep -B1 -A1 -n 'int kallsyms_on_each_symbol' kallsyms.c | grep -q CONFIG_LIVEPATCH
+          ! grep -B1 -A1 -n 'int kallsyms_on_each_symbol' kernel/kallsyms.c | grep -q CONFIG_LIVEPATCH
+          echo "KALLSYMS_FIX=PASS" | tee ../Evolution-V441-Report/kallsyms-fix-status.txt
 
       - name: Configure whyred kernel with builtin KernelSU
         working-directory: kernel
@@ -141,7 +142,7 @@ jobs:
           grep -q '^CONFIG_KSU=y$' out/.config
           grep -q '^CONFIG_KALLSYMS=y$' out/.config
           grep -q '^CONFIG_KSU_HACK_ARM64_BRANCH_LINK=y$' out/.config
-          cp out/.config ../Evolution-V44-Report/kernel.config
+          cp out/.config ../Evolution-V441-Report/kernel.config
 
       - name: Audit KernelSU integration
         working-directory: kernel
@@ -160,14 +161,14 @@ jobs:
             grep -E '^(CONFIG_(KSU|KALLSYMS|KSU_HACK_ARM64_BRANCH_LINK|KSU_TAMPER_SYSCALL_TABLE))|^# CONFIG_KSU' out/.config || true
             echo "===== LINK ====="
             readlink -f drivers/kernelsu
-          } | tee ../Evolution-V44-Report/integration-audit.txt
+          } | tee ../Evolution-V441-Report/integration-audit.txt
 
       - name: Compile kernel and capture first compiler error
         working-directory: kernel
         shell: bash
         run: |
           set -uo pipefail
-          mkdir -p ../Evolution-V44-Report
+          mkdir -p ../Evolution-V441-Report
           : > build.log
           set +e
           make -j2 O=out \
@@ -179,14 +180,14 @@ jobs:
             Image.gz-dtb 2>&1 | tee build.log
           result=${PIPESTATUS[0]}
           set -e
-          echo "MAKE_EXIT_CODE=$result" | tee ../Evolution-V44-Report/compile-status.txt
+          echo "MAKE_EXIT_CODE=$result" | tee ../Evolution-V441-Report/compile-status.txt
           if [ "$result" -eq 0 ] && [ -s out/arch/arm64/boot/Image.gz-dtb ]; then
-            cp out/arch/arm64/boot/Image.gz-dtb ../Evolution-V44-Report/
+            cp out/arch/arm64/boot/Image.gz-dtb ../Evolution-V441-Report/
             sha256sum out/arch/arm64/boot/Image.gz-dtb \
-              > ../Evolution-V44-Report/Image.gz-dtb.sha256
-            echo "IMAGE_GZ_DTB=PASS" >> ../Evolution-V44-Report/compile-status.txt
+              > ../Evolution-V441-Report/Image.gz-dtb.sha256
+            echo "IMAGE_GZ_DTB=PASS" >> ../Evolution-V441-Report/compile-status.txt
           else
-            echo "IMAGE_GZ_DTB=NOT_GENERATED" >> ../Evolution-V44-Report/compile-status.txt
+            echo "IMAGE_GZ_DTB=NOT_GENERATED" >> ../Evolution-V441-Report/compile-status.txt
             exit 1
           fi
 
@@ -195,22 +196,24 @@ jobs:
         working-directory: kernel
         shell: bash
         run: |
-          mkdir -p ../Evolution-V44-Report
-          cp build.log ../Evolution-V44-Report/build.log 2>/dev/null || true
-          cp out/.config ../Evolution-V44-Report/kernel.config 2>/dev/null || true
-          git rev-parse HEAD > ../Evolution-V44-Report/kernel-commit.txt 2>/dev/null || true
-          git -C KernelSU rev-parse HEAD > ../Evolution-V44-Report/kernelsu-commit.txt 2>/dev/null || true
+          mkdir -p ../Evolution-V441-Report
+          cp build.log ../Evolution-V441-Report/build.log 2>/dev/null || true
+          cp ../Evolution-V44-kernelsu-kallsyms-fix.txt ../Evolution-V441-Report/ 2>/dev/null || true
+          cp out/.config ../Evolution-V441-Report/kernel.config 2>/dev/null || true
+          git rev-parse HEAD > ../Evolution-V441-Report/kernel-commit.txt 2>/dev/null || true
+          git -C KernelSU rev-parse HEAD > ../Evolution-V441-Report/kernelsu-commit.txt 2>/dev/null || true
           if [ -s out/arch/arm64/boot/Image.gz-dtb ]; then
-            cp out/arch/arm64/boot/Image.gz-dtb ../Evolution-V44-Report/
+            cp out/arch/arm64/boot/Image.gz-dtb ../Evolution-V441-Report/
             sha256sum out/arch/arm64/boot/Image.gz-dtb \
-              > ../Evolution-V44-Report/Image.gz-dtb.sha256
+              > ../Evolution-V441-Report/Image.gz-dtb.sha256
           fi
 
       - name: Upload V4.4 report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Evolution-Kernel-V44-KernelSU-Kallsyms-Fix-Report
-          path: Evolution-V44-Report/
+          name: Evolution-Kernel-V441-KernelSU-Kallsyms-Fix-Report
+          path: Evolution-V441-Report/
           if-no-files-found: warn
           retention-days: 14
+          
