@@ -1,238 +1,223 @@
-
-name: Evolution Kernel - SukiSU Build Verification V4
+name: Evolution Kernel - V4.2 SUSFS 4.19 Integration Compile
 
 on:
   workflow_dispatch:
-    inputs:
-      source_branch:
-        description: "Whyred kernel source branch"
-        required: true
-        default: "back-st21-layered-sched-stable"
-        type: string
-
-      sukisu_ref:
-        description: "Pinned SukiSU commit"
-        required: true
-        default: "adf6e86d55229ad78a5f7758bdc43d92fd1c3729"
-        type: string
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Evolution - Kernel Compile Test
+    name: whyred - pinned kernel + SukiSU + SUSFS 4.19
     runs-on: ubuntu-22.04
-    timeout-minutes: 90
+    timeout-minutes: 100
+    env:
+      KERNEL_PIN: 9d9af460edf7a3889b05933f93c0ff137f56b3a4
+      SUKISU_PIN: adf6e86d55229ad78a5f7758bdc43d92fd1c3729
+      SUSFS_PATCH_URL: https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch
 
     steps:
-      - name: Checkout whyred Kernel
+      - name: Checkout pinned whyred kernel
         uses: actions/checkout@v4
         with:
           repository: user-why-red/android_kernel_xiaomi_sdm660_419
-          ref: ${{ inputs.source_branch }}
+          ref: 9d9af460edf7a3889b05933f93c0ff137f56b3a4
           fetch-depth: 1
           path: kernel
 
-      - name: Install Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            bc bison flex make \
-            python3 python-is-python3 \
-            gcc-aarch64-linux-gnu \
-            gcc-arm-linux-gnueabi \
-            clang lld llvm \
-            libssl-dev libelf-dev \
-            device-tree-compiler \
-            cpio rsync zip unzip curl
-
-      - name: Prepare Pinned SukiSU
-        working-directory: kernel
-        env:
-          SUKISU_REF: ${{ inputs.sukisu_ref }}
-        run: |
-          set -euo pipefail
-
-          curl -fL \
-            https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh \
-            -o /tmp/sukisu-setup.sh
-
-          echo "3b957d854e1112e060d1208d9830515672609430a609f5d32530935bea0b4330  /tmp/sukisu-setup.sh" \
-            | sha256sum -c -
-
-          bash /tmp/sukisu-setup.sh "$SUKISU_REF"
-
-          ACTUAL="$(git -C KernelSU rev-parse HEAD)"
-
-          test "$ACTUAL" = "$SUKISU_REF"
-          test -L drivers/kernelsu
-          test -f drivers/kernelsu/Makefile
-          test -f drivers/kernelsu/Kconfig
-
-          echo "SukiSU commit verified: $ACTUAL"
-        
-      - name: Apply Kernel 4.19 Compatibility Patch
+      - name: Verify kernel pin
         working-directory: kernel
         shell: bash
         run: |
           set -euo pipefail
+          actual="$(git rev-parse HEAD)"
+          test "$actual" = "$KERNEL_PIN"
+          mkdir -p ../Evolution-V42-Report
+          echo "$actual" | tee ../Evolution-V42-Report/kernel-commit.txt
 
-          FILE="drivers/kernelsu/kernel_includes.h"
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison flex make python3 python-is-python3 \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+            clang lld llvm libssl-dev libelf-dev \
+            device-tree-compiler cpio rsync zip unzip curl
 
-          test -f "$FILE"
-
-          python3 - <<'PY'
-          from pathlib import Path
-
-          p = Path("drivers/kernelsu/kernel_includes.h")
-          s = p.read_text()
-
-          old = "#include <linux/static_call.h>"
-          new = "#include <linux/jump_label.h>"
-
-          count = s.count(old)
-          if count != 1:
-              raise SystemExit(
-                  f"Expected exactly one static_call include, found {count}"
-              )
-
-          p.write_text(s.replace(old, new, 1))
-          print("V4.2 compatibility patch: APPLIED")
-          PY
-
-          grep -n 'linux/jump_label.h' "$FILE"
-
-          if grep -q 'linux/static_call.h' "$FILE"; then
-            echo "PATCH FAILED"
-            exit 1
-          fi
-          
-      - name: Configure Kernel
+      - name: Prepare pinned SukiSU
         working-directory: kernel
+        shell: bash
         run: |
           set -euo pipefail
+          curl -fL \
+            https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh \
+            -o /tmp/sukisu-setup.sh
+          echo "3b957d854e1112e060d1208d9830515672609430a609f5d32530935bea0b4330  /tmp/sukisu-setup.sh" \
+            | sha256sum -c -
+          bash /tmp/sukisu-setup.sh "$SUKISU_PIN"
+          actual="$(git -C KernelSU rev-parse HEAD)"
+          test "$actual" = "$SUKISU_PIN"
+          test -f drivers/kernelsu/Makefile
+          test -f drivers/kernelsu/Kconfig
+          echo "$actual" | tee ../Evolution-V42-Report/sukisu-commit.txt
 
+      - name: Apply audited Linux 4.19 static-key include compatibility
+        working-directory: kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+          file="drivers/kernelsu/kernel_includes.h"
+          test -f "$file"
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("drivers/kernelsu/kernel_includes.h")
+          s = p.read_text()
+          old = "#include <linux/static_call.h>"
+          new = "#include <linux/jump_label.h>"
+          n = s.count(old)
+          if n != 1:
+              raise SystemExit(f"Expected exactly one {old!r}; found {n}")
+          p.write_text(s.replace(old, new, 1))
+          PY
+          grep -n 'linux/jump_label.h' "$file"
+          ! grep -q 'linux/static_call.h' "$file"
+
+      - name: Fetch and verify SUSFS 4.19 patch compatibility
+        working-directory: kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ../Evolution-V42-Report
+          curl -fL "$SUSFS_PATCH_URL" -o /tmp/susfs_patch_to_4.19.patch
+          sha256sum /tmp/susfs_patch_to_4.19.patch \
+            | tee ../Evolution-V42-Report/susfs-patch.sha256
+          {
+            echo "SUSFS_PATCH_URL=$SUSFS_PATCH_URL"
+            echo "PATCH_LINES=$(wc -l < /tmp/susfs_patch_to_4.19.patch)"
+            echo "PATCH_BYTES=$(wc -c < /tmp/susfs_patch_to_4.19.patch)"
+          } | tee ../Evolution-V42-Report/susfs-patch-info.txt
+
+          git apply --check /tmp/susfs_patch_to_4.19.patch \
+            2>&1 | tee ../Evolution-V42-Report/susfs-apply-check.log
+
+          git apply /tmp/susfs_patch_to_4.19.patch
+
+          test -s include/linux/susfs.h
+          test -s include/linux/susfs_def.h
+          test -s fs/susfs.c
+
+          if ! grep -R -n -F 'v2.4.0' include/linux/susfs.h include/linux/susfs_def.h fs/susfs.c \
+            | tee ../Evolution-V42-Report/susfs-version-evidence.txt; then
+            echo "PATCH_APPLIED_BUT_V2.4.0_VERSION_NOT_PROVEN" \
+              | tee ../Evolution-V42-Report/susfs-version-status.txt
+            echo "Stopping safely: patch content does not prove SUSFS v2.4.0."
+            exit 1
+          fi
+
+          echo "SUSFS_4_19_PATCH_APPLIED_AND_V2.4.0_MARKER_FOUND" \
+            | tee ../Evolution-V42-Report/susfs-version-status.txt
+
+      - name: Configure kernel with SukiSU and SUSFS
+        working-directory: kernel
+        shell: bash
+        run: |
+          set -euo pipefail
           make O=out \
             ARCH=arm64 \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             CLANG_TRIPLE=aarch64-linux-gnu- \
-            CC=clang \
-            LD=ld.lld \
+            CC=clang LD=ld.lld \
             vendor/whyred-perf_defconfig
 
           scripts/config --file out/.config \
             --enable KSU \
+            --enable KSU_SUSFS \
             --enable KALLSYMS \
+            --enable JUMP_LABEL \
+            --disable KPM \
             --set-str LOCALVERSION "-Evolution" \
-            --disable LOCALVERSION_AUTO \
-            --disable KPM
+            --disable LOCALVERSION_AUTO
 
           make O=out \
             ARCH=arm64 \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             CLANG_TRIPLE=aarch64-linux-gnu- \
-            CC=clang \
-            LD=ld.lld \
+            CC=clang LD=ld.lld \
             olddefconfig
 
           grep -q '^CONFIG_KSU=y$' out/.config
-  
-      - name: Audit Static Call Compatibility
+          grep -q '^CONFIG_KSU_SUSFS=y$' out/.config
+          grep -q '^CONFIG_KALLSYMS=y$' out/.config
+          grep -q '^CONFIG_JUMP_LABEL=y$' out/.config
+          cp out/.config ../Evolution-V42-Report/kernel.config
+
+      - name: Audit SUSFS and SukiSU integration
         working-directory: kernel
         shell: bash
         run: |
-          set -eu
-
-          mkdir -p ../Evolution-V41-Report
-
-          {
-            echo "===== EVOLUTION V4.1 COMPATIBILITY AUDIT ====="
-
-            echo "===== KERNEL VERSION ====="
-            head -n 5 Makefile
-
-            echo "===== SUKISU HEADER ====="
-            sed -n '55,95p' drivers/kernelsu/kernel_includes.h
-
-            echo "===== STATIC CALL HEADER CHECK ====="
-            if [ -f include/linux/static_call.h ]; then
-              echo "STATIC_CALL_HEADER: FOUND"
-            else
-              echo "STATIC_CALL_HEADER: MISSING"
-            fi
-
-            echo "===== STATIC CALL REFERENCES ====="
-            grep -RInE \
-              'static_call|static_branch|static_key' \
-              drivers/kernelsu include/linux kernel \
-              --include='*.c' --include='*.h' \
-              || true
-
-            echo "===== STATIC KEY REFERENCES ====="
-            grep -RInE \
-              'static_key_(slow|enabled|disable|enable)' \
-              include/linux kernel \
-              --include='*.h' --include='*.c' \
-              | head -n 150 || true
-
-            echo "===== KERNEL CONFIG ====="
-            grep -E \
-              'CONFIG_(KSU|KPM|KALLSYMS|KALLSYMS_ALL|JUMP_LABEL)' \
-              out/.config || true
-
-          } | tee ../Evolution-V41-Report/compatibility.txt
-      
-      - name: Compile Kernel
-        working-directory: kernel
-        run: |
           set -euo pipefail
+          {
+            echo "===== PINNED COMMITS ====="
+            git rev-parse HEAD
+            git -C KernelSU rev-parse HEAD
+            echo "===== SUSFS FILES ====="
+            ls -l include/linux/susfs.h include/linux/susfs_def.h fs/susfs.c
+            echo "===== SUSFS VERSION MARKER ====="
+            grep -R -n -F 'v2.4.0' include/linux/susfs.h include/linux/susfs_def.h fs/susfs.c
+            echo "===== CONFIG ====="
+            grep -E '^(CONFIG_(KSU|KSU_SUSFS|KALLSYMS|JUMP_LABEL|KPM))|^# CONFIG_KPM' out/.config || true
+            echo "===== SukiSU SUSFS INCLUDE ====="
+            grep -n 'linux/susfs.h' drivers/kernelsu/kernel_includes.h
+          } | tee ../Evolution-V42-Report/integration-audit.txt
 
+      - name: Compile kernel and preserve complete log
+        working-directory: kernel
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p ../Evolution-V42-Report
+          : > build.log
+          set +e
           make -j2 O=out \
             ARCH=arm64 \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             CLANG_TRIPLE=aarch64-linux-gnu- \
-            CC=clang \
-            LD=ld.lld \
+            CC=clang LD=ld.lld \
             Image.gz-dtb 2>&1 | tee build.log
-
+          result=${PIPESTATUS[0]}
+          set -e
+          echo "MAKE_EXIT_CODE=$result" | tee ../Evolution-V42-Report/compile-status.txt
+          test "$result" -eq 0
           test -s out/arch/arm64/boot/Image.gz-dtb
+          cp out/arch/arm64/boot/Image.gz-dtb ../Evolution-V42-Report/
+          sha256sum out/arch/arm64/boot/Image.gz-dtb \
+            > ../Evolution-V42-Report/Image.gz-dtb.sha256
+          echo "IMAGE_GZ_DTB=PASS" >> ../Evolution-V42-Report/compile-status.txt
 
-          echo "KERNEL_COMPILE: PASS"
-
-      - name: Prepare Build Report
+      - name: Collect diagnostics even after failure
         if: always()
         working-directory: kernel
+        shell: bash
         run: |
-          mkdir -p ../Evolution-V4-Report
-
-          cp out/.config \
-            ../Evolution-V4-Report/kernel.config 2>/dev/null || true
-
-          cp build.log \
-            ../Evolution-V4-Report/build.log 2>/dev/null || true
-
-          git rev-parse HEAD \
-            > ../Evolution-V4-Report/kernel-commit.txt
-
-          git -C KernelSU rev-parse HEAD \
-            > ../Evolution-V4-Report/sukisu-commit.txt 2>/dev/null || true
-
+          mkdir -p ../Evolution-V42-Report
+          cp build.log ../Evolution-V42-Report/build.log 2>/dev/null || true
+          cp out/.config ../Evolution-V42-Report/kernel.config 2>/dev/null || true
+          git rev-parse HEAD > ../Evolution-V42-Report/kernel-commit.txt 2>/dev/null || true
+          git -C KernelSU rev-parse HEAD > ../Evolution-V42-Report/sukisu-commit.txt 2>/dev/null || true
           if [ -s out/arch/arm64/boot/Image.gz-dtb ]; then
-            cp out/arch/arm64/boot/Image.gz-dtb \
-              ../Evolution-V4-Report/
+            cp out/arch/arm64/boot/Image.gz-dtb ../Evolution-V42-Report/
+            sha256sum out/arch/arm64/boot/Image.gz-dtb \
+              > ../Evolution-V42-Report/Image.gz-dtb.sha256
           fi
-      
-      - name: Upload V4.1 Compatibility Audit
+
+      - name: Upload V4.2 report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Evolution-Kernel-V41-Compatibility-Audit
-          path: |
-            Evolution-V41-Report/
-            Evolution-V4-Report/
+          name: Evolution-Kernel-V42-SUSFS-Compile-Report
+          path: Evolution-V42-Report/
           if-no-files-found: warn
           retention-days: 14
