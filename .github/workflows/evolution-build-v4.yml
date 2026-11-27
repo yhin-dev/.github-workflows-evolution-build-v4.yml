@@ -71,8 +71,39 @@ jobs:
           test -f drivers/kernelsu/Kconfig
 
           echo "SukiSU commit verified: $ACTUAL"
-
           
+      - name: Configure Kernel
+        working-directory: kernel
+        run: |
+          set -euo pipefail
+
+          make O=out \
+            ARCH=arm64 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CC=clang \
+            LD=ld.lld \
+            vendor/whyred-perf_defconfig
+
+          scripts/config --file out/.config \
+            --enable KSU \
+            --enable KALLSYMS \
+            --set-str LOCALVERSION "-Evolution" \
+            --disable LOCALVERSION_AUTO \
+            --disable KPM
+
+          make O=out \
+            ARCH=arm64 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CC=clang \
+            LD=ld.lld \
+            olddefconfig
+
+          grep -q '^CONFIG_KSU=y$' out/.config
+  
       - name: Audit Static Call Compatibility
         working-directory: kernel
         shell: bash
@@ -117,39 +148,7 @@ jobs:
               out/.config || true
 
           } | tee ../Evolution-V41-Report/compatibility.txt
-
-      - name: Configure Kernel
-        working-directory: kernel
-        run: |
-          set -euo pipefail
-
-          make O=out \
-            ARCH=arm64 \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            CC=clang \
-            LD=ld.lld \
-            vendor/whyred-perf_defconfig
-
-          scripts/config --file out/.config \
-            --enable KSU \
-            --enable KALLSYMS \
-            --set-str LOCALVERSION "-Evolution" \
-            --disable LOCALVERSION_AUTO \
-            --disable KPM
-
-          make O=out \
-            ARCH=arm64 \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            CC=clang \
-            LD=ld.lld \
-            olddefconfig
-
-          grep -q '^CONFIG_KSU=y$' out/.config
-
+      
       - name: Compile Kernel
         if: false
         working-directory: kernel
