@@ -71,6 +71,42 @@ jobs:
           test -f drivers/kernelsu/Kconfig
 
           echo "SukiSU commit verified: $ACTUAL"
+        
+      - name: Apply Kernel 4.19 Compatibility Patch
+        working-directory: kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FILE="drivers/kernelsu/kernel_includes.h"
+
+          test -f "$FILE"
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("drivers/kernelsu/kernel_includes.h")
+          s = p.read_text()
+
+          old = "#include <linux/static_call.h>"
+          new = "#include <linux/jump_label.h>"
+
+          count = s.count(old)
+          if count != 1:
+              raise SystemExit(
+                  f"Expected exactly one static_call include, found {count}"
+              )
+
+          p.write_text(s.replace(old, new, 1))
+          print("V4.2 compatibility patch: APPLIED")
+          PY
+
+          grep -n 'linux/jump_label.h' "$FILE"
+
+          if grep -q 'linux/static_call.h' "$FILE"; then
+            echo "PATCH FAILED"
+            exit 1
+          fi
           
       - name: Configure Kernel
         working-directory: kernel
@@ -150,7 +186,6 @@ jobs:
           } | tee ../Evolution-V41-Report/compatibility.txt
       
       - name: Compile Kernel
-        if: false
         working-directory: kernel
         run: |
           set -euo pipefail
