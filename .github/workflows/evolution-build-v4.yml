@@ -1,23 +1,54 @@
-name: Evolution Kernel - V4.5 SUSFS 4.19 Port Audit
+name: Evolution Kernel - V4.6 SUSFS 4.19 Port and Compile Test
 
 on:
   workflow_dispatch:
+    inputs:
+      config_path:
+        description: "Path to the proven V4.4.1 kernel.config committed in this repository"
+        required: true
+        default: ".github/configs/whyred-v4.4.1.config"
+      run_compile:
+        description: "Run compile only after every SUSFS port check passes"
+        type: boolean
+        required: true
+        default: true
 
 permissions:
   contents: read
 
+concurrency:
+  group: evolution-whyred-v46-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  audit:
-    name: whyred - audit SUSFS 4.19 patch against pinned source
+  susfs-port-compile:
+    name: whyred - SUSFS v2.4.0 port validation and compile test
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    timeout-minutes: 180
     env:
       KERNEL_PIN: 9d9af460edf7a3889b05933f93c0ff137f56b3a4
       KSU_PIN: 9a02a5c1e552fb21cdb505c3c0428901eca43848
       SUSFS_PATCH_URL: https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/ec069a4e34f9/Patches/Patch/susfs_patch_to_4.19.patch
+      REPORT: ${{ github.workspace }}/Evolution-V46-SUSFS-Port-Compile
+      ARCH: arm64
+      SUBARCH: arm64
+      O: ${{ github.workspace }}/kernel/out
 
     steps:
-      - name: Checkout pinned whyred kernel
+      - name: Initialize diagnostics
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p "$REPORT"
+          {
+            echo "WORKFLOW=V4.6"
+            echo "KERNEL_PIN=$KERNEL_PIN"
+            echo "KSU_PIN=$KSU_PIN"
+            echo "RUN_ID=$GITHUB_RUN_ID"
+            echo "RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT"
+          } | tee "$REPORT/run-info.txt"
+
+      - name: Checkout pinned kernel source
         uses: actions/checkout@v4
         with:
           repository: user-why-red/android_kernel_xiaomi_sdm660_419
@@ -25,93 +56,162 @@ jobs:
           fetch-depth: 1
           path: kernel
 
-      - name: Verify source and prepare report
+      - name: Verify pinned source and config
         working-directory: kernel
         shell: bash
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$KERNEL_PIN"
-          mkdir -p ../Evolution-V45-SUSFS-Port-Audit
-          echo "$KERNEL_PIN" > ../Evolution-V45-SUSFS-Port-Audit/kernel-commit.txt
-          echo "$KSU_PIN" > ../Evolution-V45-SUSFS-Port-Audit/kernelsu-reference-commit.txt
+          echo "$KERNEL_PIN" > "$REPORT/kernel-commit.txt"
+          test -s "${{ inputs.config_path }}"
+          cp "${{ inputs.config_path }}" "$REPORT/kernel.config.input"
+          sha256sum "$REPORT/kernel.config.input" | tee "$REPORT/kernel-config.sha256"
+          grep -q '^CONFIG_ARM64=y$' "$REPORT/kernel.config.input"
+          {
+            echo "KERNEL_SOURCE=PASS"
+            echo "CONFIG_INPUT=PASS"
+          } | tee "$REPORT/source-check.txt"
 
-      - name: Fetch pinned SUSFS 4.19 port
+      - name: Fetch SUSFS 4.19 patch and preserve provenance
         working-directory: kernel
         shell: bash
         run: |
           set -euo pipefail
-          curl -fL "$SUSFS_PATCH_URL" -o ../Evolution-V45-SUSFS-Port-Audit/susfs_patch_to_4.19.patch
-          sha256sum ../Evolution-V45-SUSFS-Port-Audit/susfs_patch_to_4.19.patch \
-            | tee ../Evolution-V45-SUSFS-Port-Audit/susfs-patch.sha256
+          curl -fL --retry 3 "$SUSFS_PATCH_URL" -o "$REPORT/susfs_patch_to_4.19.patch"
+          sha256sum "$REPORT/susfs_patch_to_4.19.patch" | tee "$REPORT/susfs-patch.sha256"
           {
             echo "PATCH_URL=$SUSFS_PATCH_URL"
-            echo "PATCH_LINES=$(wc -l < ../Evolution-V45-SUSFS-Port-Audit/susfs_patch_to_4.19.patch)"
-            echo "PATCH_BYTES=$(wc -c < ../Evolution-V45-SUSFS-Port-Audit/susfs_patch_to_4.19.patch)"
-          } | tee ../Evolution-V45-SUSFS-Port-Audit/susfs-patch-info.txt
+            echo "PATCH_LINES=$(wc -l < "$REPORT/susfs_patch_to_4.19.patch")"
+            echo "PATCH_BYTES=$(wc -c < "$REPORT/susfs_patch_to_4.19.patch")"
+          } | tee "$REPORT/susfs-patch-info.txt"
 
-      - name: Apply non-destructive partial port audit
+      - name: Apply compatible patch hunks and capture rejected hunks
         working-directory: kernel
         shell: bash
         run: |
           set -uo pipefail
-          REPORT="../Evolution-V45-SUSFS-Port-Audit"
-          PATCH="$REPORT/susfs_patch_to_4.19.patch"
-
-          # --reject applies only hunks whose context matches and writes every
-          # rejected hunk to a .rej file. This checkout is disposable; no
-          # partially patched source is committed or compiled.
           set +e
-          git apply --reject --whitespace=nowarn --verbose "$PATCH" \
-            > "$REPORT/git-apply-reject.log" 2>&1
+          git apply --reject --whitespace=nowarn --verbose "$REPORT/susfs_patch_to_4.19.patch" \
+            > "$REPORT/git-apply.log" 2>&1
           APPLY_RC=$?
           set -e
           echo "GIT_APPLY_REJECT_EXIT=$APPLY_RC" | tee "$REPORT/apply-status.txt"
-
-          git diff --stat > "$REPORT/applied-diff-stat.txt" || true
-          git diff --name-only > "$REPORT/applied-files.txt" || true
-
+          git diff --check > "$REPORT/diff-check.log" 2>&1
+          git diff --stat > "$REPORT/applied-diff-stat.txt"
+          git diff --name-only > "$REPORT/applied-files.txt"
           find . -type f -name '*.rej' -print | sort > "$REPORT/rejected-files.txt"
-          REJ_COUNT="$(wc -l < "$REPORT/rejected-files.txt" | tr -d ' ')"
-          echo "REJECTED_FILE_COUNT=$REJ_COUNT" | tee -a "$REPORT/apply-status.txt"
-
           mkdir -p "$REPORT/rejects"
           while IFS= read -r f; do
             [ -n "$f" ] || continue
-            dest="$REPORT/rejects/$f"
-            mkdir -p "$(dirname "$dest")"
-            cp "$f" "$dest"
+            mkdir -p "$REPORT/rejects/$(dirname "$f")"
+            cp "$f" "$REPORT/rejects/$f"
           done < "$REPORT/rejected-files.txt"
+          echo "REJECTED_FILE_COUNT=$(wc -l < "$REPORT/rejected-files.txt" | tr -d ' ')" \
+            | tee -a "$REPORT/apply-status.txt"
 
-          # Capture exact target-side contexts for the files that previously
-          # conflicted, without editing those files further.
-          for f in fs/Makefile fs/namespace.c fs/proc/cmdline.c fs/proc/task_mmu.c fs/super.c kernel/sys.c mm/memory.c; do
-            if [ -f "$f" ]; then
-              mkdir -p "$REPORT/target-context/$(dirname "$f")"
-              cp "$f" "$REPORT/target-context/$f"
-            fi
-          done
-
+      - name: SUSFS source and dependency audit
+        if: always()
+        working-directory: kernel
+        shell: bash
+        run: |
+          set +e
           {
-            echo "===== PINNED KERNEL ====="
-            git rev-parse HEAD
-            echo "===== PATCHED FILES ====="
-            cat "$REPORT/applied-files.txt"
-            echo "===== REJECTED HUNKS ====="
-            cat "$REPORT/rejected-files.txt"
-            echo "===== SUSFS FILE PRESENCE ====="
+            echo "===== SUSFS SOURCE FILES ====="
             for f in fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h; do
-              if [ -s "$f" ]; then echo "PRESENT $f"; else echo "MISSING $f"; fi
+              if test -s "$f"; then echo "PRESENT $f"; else echo "MISSING $f"; fi
             done
-          } > "$REPORT/port-audit-summary.txt"
+            echo "===== CONFIG SYMBOLS IN PATCH ====="
+            grep -oE 'CONFIG_KSU_SUSFS_[A-Z0-9_]+' "$REPORT/susfs_patch_to_4.19.patch" | sort -u
+            echo "===== SUSFS VERSION MARKERS ====="
+            grep -RniE 'SUSFS_VERSION|SUSFS v?2\\.4\\.0|2\\.4\\.0' fs include 2>/dev/null | head -200
+            echo "===== REQUIRED SOURCE REFERENCES ====="
+            grep -RniE 'susfs_(is_current_ksu_domain|alloc_non_unshare_ksu_vfsmnt|spoof_cmdline_or_bootconfig|spoof_uname)' fs include kernel mm 2>/dev/null | head -200
+          } > "$REPORT/susfs-dependency-audit.txt"
+          # Marker-only presence is not accepted as proof of a complete v2.4.0 port.
+          for f in fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h; do
+            test -s "$f" || exit 1
+          done
+          REJ_COUNT="$(find . -type f -name '*.rej' | wc -l)"
+          if [ "$REJ_COUNT" -ne 0 ]; then
+            echo "PORT_GATE=FAIL_REJECTED_HUNKS_$REJ_COUNT" | tee "$REPORT/port-gate.txt"
+            exit 20
+          fi
+          echo "PORT_GATE=PATCH_APPLIED_WITHOUT_REJECTS" | tee "$REPORT/port-gate.txt"
 
-          # This workflow is an audit only; never proceed to compile a partial port.
-          echo "AUDIT_ONLY=PASS" >> "$REPORT/apply-status.txt"
+      - name: Install build dependencies
+        if: success() && inputs.run_compile
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential flex gcc-aarch64-linux-gnu \
+            libssl-dev libelf-dev python3 python-is-python3 clang-14 lld-14 \
+            device-tree-compiler cpio rsync
 
-      - name: Upload SUSFS port audit even if earlier step fails
+      - name: Configure kernel from V4.4.1 config
+        if: success() && inputs.run_compile
+        working-directory: kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          cp "$REPORT/kernel.config.input" out/.config
+          make O=out ARCH=arm64 olddefconfig
+          cp out/.config "$REPORT/kernel.config.final"
+          grep -E '^(CONFIG_KSU|CONFIG_KSU_SUSFS|CONFIG_KSU_SUSFS_[A-Z0-9_]+)=' out/.config \
+            > "$REPORT/susfs-kconfig-enabled.txt" || true
+          grep -q '^CONFIG_KSU=y$' out/.config
+          # Do not silently force SUSFS symbols: they must be defined by the integrated Kconfig.
+          grep -q '^CONFIG_KSU_SUSFS=y$' out/.config
+
+      - name: Compile test Image.gz-dtb
+        if: success() && inputs.run_compile
+        working-directory: kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          make -j"$(nproc --all)" O=out ARCH=arm64 \
+            CC=clang-14 LD=ld.lld-14 LLVM=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            Image.gz-dtb 2>&1 | tee "$REPORT/build.log"
+          BUILD_RC=${PIPESTATUS[0]}
+          set -e
+          echo "MAKE_EXIT_CODE=$BUILD_RC" | tee "$REPORT/compile-status.txt"
+          if [ "$BUILD_RC" -ne 0 ]; then exit "$BUILD_RC"; fi
+          IMAGE="out/arch/arm64/boot/Image.gz-dtb"
+          test -s "$IMAGE"
+          gzip -t "$IMAGE"
+          cp "$IMAGE" "$REPORT/Image.gz-dtb"
+          sha256sum "$REPORT/Image.gz-dtb" | tee "$REPORT/Image.gz-dtb.sha256"
+          echo "IMAGE_GZ_DTB=PASS" | tee -a "$REPORT/compile-status.txt"
+
+      - name: Collect diagnostics even after failure
+        if: always()
+        working-directory: kernel
+        shell: bash
+        run: |
+          mkdir -p "$REPORT/diagnostics"
+          {
+            echo "JOB_STATUS=$?"
+            echo "KERNEL_HEAD=$(git rev-parse HEAD 2>/dev/null || echo unavailable)"
+            echo "UTC=$(date -u +%FT%TZ)"
+          } > "$REPORT/diagnostics/final-state.txt"
+          if [ -d out ]; then
+            cp out/.config "$REPORT/diagnostics/final-dot-config" 2>/dev/null || true
+            find out -maxdepth 4 -type f \( -name '*.o' -o -name '*.cmd' -o -name 'vmlinux' \) \
+              | head -500 > "$REPORT/diagnostics/build-products.txt"
+          fi
+          git status --short > "$REPORT/diagnostics/git-status.txt" 2>&1 || true
+          git diff --check > "$REPORT/diagnostics/diff-check-final.txt" 2>&1 || true
+          find . -type f -name '*.rej' -print | sort > "$REPORT/diagnostics/rejected-files-final.txt" || true
+          [ -f "$REPORT/build.log" ] || echo "BUILD_NOT_REACHED" > "$REPORT/build-not-reached.txt"
+
+      - name: Upload V4.6 diagnostics and build artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Evolution-Kernel-V45-SUSFS-Port-Audit
-          path: Evolution-V45-SUSFS-Port-Audit/
+          name: Evolution-Kernel-V46-SUSFS-Port-Compile
+          path: Evolution-V46-SUSFS-Port-Compile/
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 30
