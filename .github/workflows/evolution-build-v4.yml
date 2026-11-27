@@ -191,9 +191,8 @@ jobs:
             cp out/arch/arm64/boot/Image.gz-dtb \
               ../Evolution-V4-Report/
           fi
-
       
-      - name: Upload V4 Build Artifact
+      - name: Upload V4.1 Compatibility Audit
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -202,6 +201,4 @@ jobs:
             Evolution-V41-Report/
             Evolution-V4-Report/
           if-no-files-found: warn
-          retention-days: 14
-
           retention-days: 14
