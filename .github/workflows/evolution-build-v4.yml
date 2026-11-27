@@ -72,6 +72,52 @@ jobs:
 
           echo "SukiSU commit verified: $ACTUAL"
 
+          
+      - name: Audit Static Call Compatibility
+        working-directory: kernel
+        shell: bash
+        run: |
+          set -eu
+
+          mkdir -p ../Evolution-V41-Report
+
+          {
+            echo "===== EVOLUTION V4.1 COMPATIBILITY AUDIT ====="
+
+            echo "===== KERNEL VERSION ====="
+            head -n 5 Makefile
+
+            echo "===== SUKISU HEADER ====="
+            sed -n '55,95p' drivers/kernelsu/kernel_includes.h
+
+            echo "===== STATIC CALL HEADER CHECK ====="
+            if [ -f include/linux/static_call.h ]; then
+              echo "STATIC_CALL_HEADER: FOUND"
+            else
+              echo "STATIC_CALL_HEADER: MISSING"
+            fi
+
+            echo "===== STATIC CALL REFERENCES ====="
+            grep -RInE \
+              'static_call|static_branch|static_key' \
+              drivers/kernelsu include/linux kernel \
+              --include='*.c' --include='*.h' \
+              || true
+
+            echo "===== STATIC KEY REFERENCES ====="
+            grep -RInE \
+              'static_key_(slow|enabled|disable|enable)' \
+              include/linux kernel \
+              --include='*.h' --include='*.c' \
+              | head -n 150 || true
+
+            echo "===== KERNEL CONFIG ====="
+            grep -E \
+              'CONFIG_(KSU|KPM|KALLSYMS|KALLSYMS_ALL|JUMP_LABEL)' \
+              out/.config || true
+
+          } | tee ../Evolution-V41-Report/compatibility.txt
+
       - name: Configure Kernel
         working-directory: kernel
         run: |
